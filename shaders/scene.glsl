@@ -51,6 +51,7 @@ layout(binding=1) uniform fs_params {
     vec4 impact5;
     vec4 impact6;
     vec4 impact7;
+    vec4 projectiles[16];
 };
 
 in vec3 ray_origin;
@@ -63,6 +64,7 @@ const uint MAT_CEIL = 3u;
 const uint MAT_GUN_METAL = 4u;
 const uint MAT_GUN_GRIP = 5u;
 const uint MAT_FLASH = 6u;
+const uint MAT_PROJECTILE = 7u;
 
 bool intersect_aabb(vec3 ro, vec3 inv, vec3 bmin, vec3 bmax, out float t0, out float t1) {
     vec3 tbot = (bmin - ro) * inv;
@@ -182,6 +184,42 @@ bool flash_trace(vec3 ro, vec3 rd, float tmax, out float t, out vec3 n) {
     return true;
 }
 
+bool projectile_trace(vec3 ro, vec3 rd, float tmax, out float t, out vec3 n, out float spell_type) {
+    t = tmax;
+    n = vec3(0.0, 0.0, 1.0);
+    spell_type = 0.0;
+    bool hit = false;
+    
+    for (int i = 0; i < 16; i++) {
+        vec4 proj = projectiles[i];
+        if (proj.w <= 0.0) {
+            continue;
+        }
+        
+        vec3 center = proj.xyz;
+        float radius = abs(proj.w);
+        spell_type = sign(proj.w);
+        
+        vec3 oc = ro - center;
+        float b = dot(oc, rd);
+        float c = dot(oc, oc) - radius * radius;
+        float disc = b * b - c;
+        
+        if (disc < 0.0) {
+            continue;
+        }
+        
+        float t_hit = -b - sqrt(disc);
+        if (t_hit >= 0.02 && t_hit < t) {
+            t = t_hit;
+            n = normalize((ro + rd * t) - center);
+            hit = true;
+        }
+    }
+    
+    return hit;
+}
+
 bool room_hit(vec3 ro, vec3 rd, vec3 inv, out float t, out vec3 n, out uint mat) {
     t = 0.0;
     n = vec3(0.0, 0.0, 1.0);
@@ -231,6 +269,8 @@ void main() {
     uint hit_mat = 0u;
     bool is_gun = false;
     bool is_flash = false;
+    bool is_projectile = false;
+    float proj_spell_type = 0.0;
 
     float rt;
     vec3 rn;
@@ -242,6 +282,20 @@ void main() {
     }
 
     float best = hit_t > 0.0 ? hit_t : 2.4;
+    
+    // Check projectiles
+    float pt;
+    vec3 pn;
+    float ptype;
+    if (projectile_trace(ro, rd, best, pt, pn, ptype)) {
+        hit_t = pt;
+        hit_n = pn;
+        hit_mat = MAT_PROJECTILE;
+        proj_spell_type = ptype;
+        is_projectile = true;
+        best = pt;
+    }
+    
     if (gun_on > 0.5) {
         float gt;
         vec3 gn;
@@ -251,6 +305,7 @@ void main() {
             hit_n = gn;
             hit_mat = gm;
             is_gun = true;
+            is_projectile = false;
             best = gt;
         }
         float ft;
@@ -261,6 +316,7 @@ void main() {
             hit_mat = MAT_FLASH;
             is_flash = true;
             is_gun = false;
+            is_projectile = false;
         }
     }
 
@@ -294,6 +350,19 @@ void main() {
         albedo = vec3(0.22, 0.12, 0.08);
     } else if (hit_mat == MAT_FLASH) {
         albedo = vec3(1.0, 0.82, 0.42);
+    } else if (hit_mat == MAT_PROJECTILE) {
+        // Color by spell type: 1=Missile(purple), 2=Orb(blue), 3=Blink(white), 4=Frost(cyan)
+        if (proj_spell_type == 1.0) {
+            albedo = vec3(0.82, 0.42, 0.92);  // Arcane purple
+        } else if (proj_spell_type == 2.0) {
+            albedo = vec3(0.52, 0.62, 0.92);  // Arcane blue
+        } else if (proj_spell_type == 3.0) {
+            albedo = vec3(0.92, 0.92, 0.98);  // Blink white
+        } else if (proj_spell_type == 4.0) {
+            albedo = vec3(0.42, 0.82, 0.92);  // Frost cyan
+        } else {
+            albedo = vec3(0.92, 0.82, 0.42);  // Default yellow
+        }
     }
 
     float burn = 0.0;
@@ -305,7 +374,7 @@ void main() {
     burn = max(burn, scorch(hp, impact5));
     burn = max(burn, scorch(hp, impact6));
     burn = max(burn, scorch(hp, impact7));
-    if (!is_gun && !is_flash && burn > 0.0) {
+    if (!is_gun && !is_flash && !is_projectile && burn > 0.0) {
         albedo *= 1.0 - burn * 0.82;
         albedo += vec3(0.12, 0.04, 0.01) * burn;
     }
@@ -313,6 +382,11 @@ void main() {
     vec3 color = albedo * 0.04;
     if (is_flash) {
         color = albedo * (0.85 + 1.4 * flash);
+    } else if (is_projectile) {
+        // Projectiles glow brightly
+        float ndv = max(dot(hit_n, -rd), 0.0);
+        float fresnel = pow(1.0 - ndv, 2.0);
+        color = albedo * (0.85 + 0.65 * fresnel);
     } else if (is_gun) {
         float ndv = max(dot(hit_n, -rd), 0.0);
         float wrap = 0.22 + 0.78 * ndv;
@@ -331,7 +405,7 @@ void main() {
         }
     }
 
-    float fog = (is_gun || is_flash) ? 0.0 : clamp(hit_t / 28.0, 0.0, 1.0);
+    float fog = (is_gun || is_flash || is_projectile) ? 0.0 : clamp(hit_t / 28.0, 0.0, 1.0);
     fog *= fog;
     color = mix(color, bg, fog);
     color = clamp(color, vec3(0.0), vec3(1.0));

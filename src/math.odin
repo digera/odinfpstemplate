@@ -33,8 +33,22 @@ len_vec3 :: proc(v: vec3) -> f32 {
 	return math.sqrt(dot_vec3(v, v))
 }
 
+// Alias for consistency
+length_vec3 :: proc(v: vec3) -> f32 {
+	return len_vec3(v)
+}
+
 len2_vec3 :: proc(v: vec3) -> f32 {
 	return dot_vec3(v, v)
+}
+
+// Linear interpolation for vec3
+lerpv3 :: proc(a, b: vec3, t: f32) -> vec3 {
+	return vec3{
+		lerpf(a.x, b.x, t),
+		lerpf(a.y, b.y, t),
+		lerpf(a.z, b.z, t),
+	}
 }
 
 norm_vec3 :: proc(v: vec3) -> vec3 {
