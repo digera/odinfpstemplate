@@ -132,10 +132,10 @@ Client_World :: struct {
 	game_state:       Server_GameState_Packet,
 	have_game_state:  bool,
 
-	// The client's own copy of the ore pylons, occupancy only. GameState
-	// carries all seven column-height blobs; dirty pylons also ride the 30 Hz
+	// The client's own copy of the ore towers, node HP only. GameState
+	// carries all seven towers; dirty towers also ride the 30 Hz
 	// snapshot so cover you are standing in does not wait on the HUD packet.
-	pylons:           Pylon_World,
+	towers:           Tower_World,
 
 	// Ore on the floor, straight from the newest snapshot. State rather than
 	// events, so a lump that stops being sent has been picked up or timed out.
@@ -418,7 +418,7 @@ client_world_init :: proc(world: ^Client_World) {
 	world.local_entity_id = INVALID_ENTITY
 	world.target_id = INVALID_ENTITY
 	client_prediction_init(&world.prediction)
-	pylon_world_init(&world.pylons)
+	tower_world_init(&world.towers)
 }
 
 client_world_reset_session :: proc(world: ^Client_World) {
@@ -442,22 +442,28 @@ client_world_reset_session :: proc(world: ^Client_World) {
 	world.chunks = {}
 	world.minion_count = 0
 	world.minions = {}
-	// A new session is a new round's worth of rock. GameState occupancy on
+	// A new session is a new round's worth of towers. GameState on
 	// the next HUD packet is the whole catch-up; there is no resync path.
-	pylon_world_reset(&world.pylons)
+	tower_world_reset(&world.towers)
 }
 
-client_world_apply_gamestate_pylons :: proc(world: ^Client_World, gs: ^Server_GameState_Packet) {
+client_world_apply_gamestate_towers :: proc(world: ^Client_World, gs: ^Server_GameState_Packet) {
 	for i in 0 ..< MAX_PYLONS {
-		pylon_apply_occupancy(&world.pylons, Pylon_ID(i), gs.pylons[i].heights[:])
+		t := tower_get(&world.towers, Pylon_ID(i))
+		if t != nil {
+			tower_unpack_nodes(t, gs.towers[i].node_hp[:])
+		}
 	}
 }
 
-client_world_apply_snapshot_pylons :: proc(world: ^Client_World, snapshot: ^Server_Snapshot_Packet) {
-	n := min(int(snapshot.occ_count), MAX_SNAPSHOT_OCC_PYLONS)
+client_world_apply_snapshot_towers :: proc(world: ^Client_World, snapshot: ^Server_Snapshot_Packet) {
+	n := min(int(snapshot.tower_count), MAX_SNAPSHOT_OCC_PYLONS)
 	for i in 0 ..< n {
-		o := &snapshot.occ[i]
-		pylon_apply_occupancy(&world.pylons, o.pylon, o.heights[:])
+		tw := &snapshot.towers[i]
+		t := tower_get(&world.towers, tw.tower_id)
+		if t != nil {
+			tower_unpack_nodes(t, tw.node_hp[:])
+		}
 	}
 }
 
@@ -532,7 +538,7 @@ client_world_apply_snapshot :: proc(world: ^Client_World, snapshot: ^Server_Snap
 	client_world_apply_strikes(world, snapshot)
 	client_world_apply_beams(world, snapshot)
 	client_world_apply_combat_events(world, snapshot)
-	client_world_apply_snapshot_pylons(world, snapshot)
+	client_world_apply_snapshot_towers(world, snapshot)
 	client_world_apply_chunks(world, snapshot)
 	client_world_apply_minions(world, snapshot)
 }

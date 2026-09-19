@@ -34,7 +34,7 @@ import "core:strconv"
 // carries up to two pylons that changed this tick so cover you are standing
 // in does not wait on the HUD packet.
 
-PROTOCOL_VERSION :: u8(13)  // beam chains can target minions
+PROTOCOL_VERSION :: u8(14)  // tower shield nodes replace occupancy grid
 MAX_PACKET_SIZE  :: 1400
 
 Packet_Type :: enum u8 {
@@ -214,8 +214,8 @@ Server_Snapshot_Packet :: struct {
 	beams:            [MAX_SNAPSHOT_BEAMS]Snapshot_Beam,
 	combat_event_count: u8,
 	combat_events:      [MAX_SNAPSHOT_COMBAT_EVENTS]Snapshot_Combat_Event,
-	occ_count:        u8,
-	occ:              [MAX_SNAPSHOT_OCC_PYLONS]Snapshot_Pylon_Occ,
+	tower_count:      u8,
+	towers:           [MAX_SNAPSHOT_OCC_PYLONS]Snapshot_Tower_Nodes,
 	chunk_count:      u8,
 	chunks:           [MAX_SNAPSHOT_CHUNKS]Snapshot_Chunk,
 }
@@ -235,16 +235,16 @@ Server_Roster_Packet :: struct {
 	entries: [MAX_ROSTER_ENTRIES]Roster_Entry,
 }
 
-// How a pylon is doing, for the HUD and for occupancy catch-up.
-Snapshot_Pylon :: struct {
-	intact:   f32,   // 0..1 of the original still standing
-	heights:  [PYLON_OCC_BYTES]u8,
+// How a tower is doing, for the HUD and for node state catch-up.
+Snapshot_Tower :: struct {
+	intact:    f32,   // 0..1 of the original still standing
+	node_hp:   [MAX_NODES_PER_TOWER]u8,  // quantized 0-255 for alive nodes, 0 for dead
 }
 
-// One dirty pylon in a 30 Hz snapshot.
-Snapshot_Pylon_Occ :: struct {
-	pylon:   Pylon_ID,
-	heights: [PYLON_OCC_BYTES]u8,
+// One dirty tower in a 30 Hz snapshot.
+Snapshot_Tower_Nodes :: struct {
+	tower_id:  Pylon_ID,
+	node_hp:   [MAX_NODES_PER_TOWER]u8,
 }
 
 Server_GameState_Packet :: struct {
@@ -262,7 +262,7 @@ Server_GameState_Packet :: struct {
 	centre_share: [TEAM_COUNT]u8,
 	match_time:   f32,
 	humans:       [TEAM_COUNT]u8,
-	pylons:       [MAX_PYLONS]Snapshot_Pylon,
+	towers:       [MAX_PYLONS]Snapshot_Tower,
 }
 
 // ---------------------------------------------------------------------------
@@ -736,8 +736,8 @@ SNAPSHOT_PROJECTILE_BYTES :: 2 + 1 + 1 + 6 + 6 + 1 + 1
 SNAPSHOT_STRIKE_BYTES :: 1 + 1 + 6
 SNAPSHOT_BEAM_BYTES   :: 1 + 1 + 6 + 1 + BEAM_MAX_CHAINS + BEAM_MAX_CHAINS * 2
 SNAPSHOT_EVENT_BYTES  :: 1 + 1 + 1 + 1 + 2
-// pylon id + column heights
-SNAPSHOT_OCC_BYTES    :: 1 + PYLON_OCC_BYTES
+// pylon id + quantized node hp array (1 byte per node, 0=dead)
+SNAPSHOT_TOWER_NODE_BYTES :: 1 + MAX_NODES_PER_TOWER  // 1 + 32 = 33 bytes
 // id, ore+rest flag, pos, coarse velocity, radius
 SNAPSHOT_CHUNK_BYTES  :: 2 + 1 + 6 + 3 + 1
 // id, kind+team, pos, yaw, health
@@ -751,16 +751,16 @@ SNAPSHOT_WORST_BYTES ::
 	MAX_SNAPSHOT_STRIKES * SNAPSHOT_STRIKE_BYTES +
 	MAX_SNAPSHOT_BEAMS * SNAPSHOT_BEAM_BYTES +
 	MAX_SNAPSHOT_COMBAT_EVENTS * SNAPSHOT_EVENT_BYTES +
-	MAX_SNAPSHOT_OCC_PYLONS * SNAPSHOT_OCC_BYTES +
+	MAX_SNAPSHOT_OCC_PYLONS * SNAPSHOT_TOWER_NODE_BYTES +
 	MAX_SNAPSHOT_CHUNKS * SNAPSHOT_CHUNK_BYTES
 
 #assert(SNAPSHOT_WORST_BYTES <= MAX_PACKET_SIZE)
 
-GAMESTATE_PYLON_BYTES :: 1 + PYLON_OCC_BYTES  // intact + heights
+GAMESTATE_TOWER_NODE_BYTES :: 1 + MAX_NODES_PER_TOWER  // intact + node hp array
 GAMESTATE_WORST_BYTES ::
 	2 + 3 + TEAM_COUNT * 4 + 1 + TEAM_COUNT + 4 + TEAM_COUNT +
 	TEAM_COUNT * ORE_COUNT * 2 +
-	MAX_PYLONS * GAMESTATE_PYLON_BYTES
+	MAX_PYLONS * GAMESTATE_TOWER_NODE_BYTES
 
 #assert(GAMESTATE_WORST_BYTES <= MAX_PACKET_SIZE)
 
@@ -875,14 +875,14 @@ serialize_server_snapshot :: proc(packet: ^Server_Snapshot_Packet, buffer: []u8)
 		bw_u16(&w, c.damage)
 	}
 
-	// Dirty pylon occupancy, at most two per snapshot so cover updates at 30 Hz.
-	vcount := min(int(packet.occ_count), MAX_SNAPSHOT_OCC_PYLONS)
-	bw_u8(&w, u8(vcount))
-	for i in 0..<vcount {
-		v := &packet.occ[i]
-		bw_u8(&w, u8(v.pylon))
-		for k in 0..<PYLON_OCC_BYTES {
-			bw_u8(&w, v.heights[k])
+	// Dirty tower nodes, at most two per snapshot so nodes update at 30 Hz.
+	tcount := min(int(packet.tower_count), MAX_SNAPSHOT_OCC_PYLONS)
+	bw_u8(&w, u8(tcount))
+	for i in 0..<tcount {
+		t := &packet.towers[i]
+		bw_u8(&w, u8(t.tower_id))
+		for k in 0..<MAX_NODES_PER_TOWER {
+			bw_u8(&w, t.node_hp[k])
 		}
 	}
 
@@ -1021,22 +1021,22 @@ deserialize_server_snapshot :: proc(buffer: []u8) -> (packet: Server_Snapshot_Pa
 	}
 	packet.combat_event_count = u8(ccount)
 
-	vcount := min(int(br_u8(&r)), MAX_SNAPSHOT_OCC_PYLONS)
-	for i in 0..<vcount {
-		v := &packet.occ[i]
-		p := br_u8(&r)
-		if p >= MAX_PYLONS {
-			p = 0
+	tcount := min(int(br_u8(&r)), MAX_SNAPSHOT_OCC_PYLONS)
+	for i in 0..<tcount {
+		t := &packet.towers[i]
+		tid := br_u8(&r)
+		if tid >= MAX_PYLONS {
+			tid = 0
 		}
-		v.pylon = Pylon_ID(p)
-		for k in 0..<PYLON_OCC_BYTES {
-			v.heights[k] = br_u8(&r)
+		t.tower_id = Pylon_ID(tid)
+		for k in 0..<MAX_NODES_PER_TOWER {
+			t.node_hp[k] = br_u8(&r)
 		}
 		if !r.ok {
 			return {}, false
 		}
 	}
-	packet.occ_count = u8(vcount)
+	packet.tower_count = u8(tcount)
 
 	kcount := min(int(br_u8(&r)), MAX_SNAPSHOT_CHUNKS)
 	for i in 0..<kcount {
@@ -1116,10 +1116,10 @@ serialize_server_gamestate :: proc(packet: ^Server_GameState_Packet, buffer: []u
 		for k in 0..<ORE_COUNT { bw_u16(&w, packet.wallets[i][k]) }
 	}
 	for i in 0..<MAX_PYLONS {
-		p := &packet.pylons[i]
-		bw_u8(&w, quant_u8(p.intact, 255))
-		for k in 0..<PYLON_OCC_BYTES {
-			bw_u8(&w, p.heights[k])
+		t := &packet.towers[i]
+		bw_u8(&w, quant_u8(t.intact, 255))
+		for k in 0..<MAX_NODES_PER_TOWER {
+			bw_u8(&w, t.node_hp[k])
 		}
 	}
 	return w.ok ? w.pos : 0
@@ -1142,10 +1142,10 @@ deserialize_server_gamestate :: proc(buffer: []u8) -> (packet: Server_GameState_
 		for k in 0..<ORE_COUNT { packet.wallets[i][k] = br_u16(&r) }
 	}
 	for i in 0..<MAX_PYLONS {
-		p := &packet.pylons[i]
-		p.intact = f32(br_u8(&r)) / 255.0
-		for k in 0..<PYLON_OCC_BYTES {
-			p.heights[k] = br_u8(&r)
+		t := &packet.towers[i]
+		t.intact = f32(br_u8(&r)) / 255.0
+		for k in 0..<MAX_NODES_PER_TOWER {
+			t.node_hp[k] = br_u8(&r)
 		}
 	}
 	return packet, r.ok

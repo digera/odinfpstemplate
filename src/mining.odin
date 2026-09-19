@@ -47,7 +47,7 @@ mining_reset :: proc(state: ^Mining_State) {
 // and what we need here is specifically *which* pylon and *where* on it.
 mining_beams_tick :: proc(
 	state:   ^Mining_State,
-	pylons:  ^Pylon_World,
+	towers:  ^Tower_World,
 	chunks:  ^Ore_Chunk_World,
 	world:   ^Entity_World,
 	dt:      f32,
@@ -77,7 +77,7 @@ mining_beams_tick :: proc(
 		origin := vec3{char.pos.x, char.pos.y, char.pos.z + PLAYER_EYE_M}
 		dir := camera_forward(char.yaw, char.pitch)
 
-		t, pylon_id, hit := pylon_raycast(pylons, origin, dir, def.range)
+		t, tower_id, _, hit := tower_raycast(g_towers, origin, dir, def.range)
 		if !hit {
 			continue
 		}
@@ -91,12 +91,12 @@ mining_beams_tick :: proc(
 			continue
 		}
 		at := origin + dir * t
-		radius := max(MINE_BITE_MIN_R, PYLON_CELL * 0.55)
-		ore, ok := pylon_mine(pylons, pylon_id, at, radius, BEAM_BITE_AMOUNT, id, world.teams[i])
+		radius := max(MINE_BITE_MIN_R, NODE_RADIUS * 1.5)
+		ore, ok := tower_mine(g_towers, tower_id, at, radius, BEAM_BITE_AMOUNT, id, world.teams[i])
 		if !ok {
 			continue
 		}
-		pylon_credit_ore(pylons, pylon_id, ore)
+		tower_credit_ore(g_towers, tower_id, ore)
 		_ = chunks
 	}
 }
@@ -125,53 +125,26 @@ body_blocks_beam :: proc(world: ^Entity_World, caster: Entity_ID, origin, dir: v
 // A detonation against a tower. Called from the projectile impact path, which
 // already knows it ran into something solid but not what.
 //
-// Reads the pylon world through the global rather than taking it as an argument
+// Reads the tower world through the global rather than taking it as an argument
 // because the projectile system is shared with the client and has no server
 // handle to thread through -- the same reason `world_point_free` finds the map
 // boxes that way.
-//
-// The projectile stops at the last free point, a sub-step short of occupancy.
-// `pylon_at_point` still finds the tower (same cylinder reject collision uses),
-// but `pylon_mine` maps `at` to a cell -- and that cell is often empty air,
-// so a small blast radius carves nothing. Snap onto the remaining rock first.
 mining_blast :: proc(at: vec3, radius: f32, owner: Entity_ID, team: Team_ID) {
-	if g_pylons == nil {
+	if g_towers == nil {
 		return
 	}
-	pad := max(radius, 0.5) + PYLON_CELL
-	id, ok := pylon_at_point(g_pylons, at, pad)
+	pad := max(radius, 0.5) + NODE_RADIUS * 2
+	id, ok := tower_at_point(g_towers, at, pad)
 	if !ok {
 		return
 	}
-	p := pylon_get(g_pylons, id)
-	g := pylon_grid(g_pylons, id)
-	if p == nil || g == nil {
-		return
-	}
-
-	hit := at
-	local := pylon_to_local(p, at)
-	if !ore_grid_blocks_point(g, local, 0) {
-		// Aim at what is still standing, not the original silhouette -- a
-		// chewed tower's mid-height may be air.
-		mid := p.base + vec3{0, 0, (p.bound_z0 + p.bound_z1) * 0.5}
-		dir := mid - at
-		ray_len := len_vec3(dir)
-		if ray_len > 0.01 {
-			dir = dir / ray_len
-			t, _, _, _, _, hit_ok := ore_grid_raycast(g, local, pylon_dir_to_local(p, dir), ray_len + pad)
-			if hit_ok {
-				hit = at + dir * t
-			}
-		}
-	}
 
 	r := max(MINE_BITE_MIN_R, radius * BLAST_RADIUS_MULT)
-	ore, mined := pylon_mine(g_pylons, id, hit, r, BLAST_AMOUNT, owner, team)
+	ore, mined := tower_mine(g_towers, id, at, r, BLAST_AMOUNT, owner, team)
 	if !mined {
 		return
 	}
-	pylon_credit_ore(g_pylons, id, ore)
+	tower_credit_ore(g_towers, id, ore)
 }
 
 // ---------------------------------------------------------------------------
@@ -216,11 +189,11 @@ mining_harvest_tick :: proc(
 	}
 }
 
-mining_report :: proc(pylons: ^Pylon_World) {
-	fmt.print("[Pylon] standing:")
-	for i in 0 ..< pylons.count {
-		p := &pylons.pylons[i]
-		fmt.printf(" %d:%s %.0f%%", i, ore_name(p.ore), p.intact * 100)
+mining_report :: proc(towers: ^Tower_World) {
+	fmt.print("[Tower] standing:")
+	for i in 0 ..< towers.count {
+		t := &towers.towers[i]
+		fmt.printf(" %d:%s %.0f%%", i, ore_name(t.ore), t.intact * 100)
 	}
 	fmt.println()
 }

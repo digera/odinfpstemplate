@@ -349,7 +349,7 @@ client_poll_network :: proc(gc: ^Game_Client) {
 		case .Server_GameState:
 			gc.client_world.game_state = packet.gamestate
 			gc.client_world.have_game_state = true
-			client_world_apply_gamestate_pylons(&gc.client_world, &packet.gamestate)
+			client_world_apply_gamestate_towers(&gc.client_world, &packet.gamestate)
 
 		case .Server_Roster:
 			roster := packet.roster

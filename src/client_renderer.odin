@@ -208,25 +208,15 @@ Client_Renderer :: struct {
 	// w is 1 where there is an orb at all.
 	orbs:         [MAX_ENTITIES]vec4,
 
-	// The pylon occupancy fields, one 3D texture with the seven 8x8x20 grids
-	// stacked along Z. Re-uploaded when occupancy changes or a column is still
-	// settling toward its replicated height.
-	pylon_tex:    sg.Image,
-	pylon_view:   sg.View,
-	pylon_smp:    sg.Sampler,
-	pylon_seen:   [MAX_PYLONS]u32,  // grid version last sampled
-	pylon_disp_h: [MAX_PYLONS][PYLON_OCC_BYTES]f32,
-	pylon_disp_ok: [MAX_PYLONS]bool,
+	// Tower node state for minimal rendering (no SDF march for this PR)
+	tower_seen:   [MAX_PYLONS]int,  // live_count last rendered
+	tower_dirty:  [MAX_PYLONS]bool,
 }
 
 // The atlas stacks slabs along Z. Trilinear filtering therefore has to be kept
 // off the seams between them, which the shader does by clamping its sample
 // coordinate half a texel inside each slab.
 PYLON_ATLAS_NZ    :: PYLON_NZ * MAX_PYLONS
-PYLON_ATLAS_BYTES :: PYLON_NX * PYLON_NY * PYLON_ATLAS_NZ
-
-@(private = "file") pylon_atlas: [PYLON_ATLAS_BYTES]u8
-
 // ---------------------------------------------------------------------------
 // Camera feel
 
@@ -351,39 +341,8 @@ client_renderer_init :: proc(r: ^Client_Renderer) {
 		label = "scene",
 	})
 
-	r.pylon_tex = sg.make_image({
-		type = ._3D,
-		usage = {stream_update = true},
-		width = PYLON_NX,
-		height = PYLON_NY,
-		num_slices = PYLON_ATLAS_NZ,
-		pixel_format = .R8,
-		label = "pylon_occupancy",
-	})
-	r.pylon_view = sg.make_view({
-		texture = {image = r.pylon_tex},
-		label = "pylon_occupancy_view",
-	})
-	// Linear in all three axes: the surface the marcher finds is the 0.5 iso of
-	// the filtered occupancy, so the filter is the shape of a stacked column,
-	// not a smoothing pass over finer voxels. Clamped, because a sample that
-	// wrapped would merge one tower into the next.
-	r.pylon_smp = sg.make_sampler({
-		min_filter = .LINEAR,
-		mag_filter = .LINEAR,
-		wrap_u = .CLAMP_TO_EDGE,
-		wrap_v = .CLAMP_TO_EDGE,
-		wrap_w = .CLAMP_TO_EDGE,
-		label = "pylon_occupancy_smp",
-	})
-	r.bind.views[VIEW_pylon_tex] = r.pylon_view
-	r.bind.samplers[SMP_pylon_smp] = r.pylon_smp
-	// Empty until the first upload fills live occupancy. Not uploaded here: an
-	// image takes one update per frame, and the first frame's is the one that
-	// carries the real grids.
-	for &b in pylon_atlas {
-		b = 0
-	}
+	// Towers: minimal rendering (crude boxes for nodes, no SDF march this PR)
+	// No GPU state needed for simple box/capsule drawing
 
 	r.pass_action = {
 		colors = {0 = {load_action = .CLEAR, clear_value = {0.02, 0.02, 0.04, 1}}},
@@ -397,47 +356,16 @@ client_renderer_shutdown :: proc(r: ^Client_Renderer) {
 	sg.shutdown()
 }
 
-// Push occupancy to the GPU. Column heights lerp so a compact reads as a drop
-// instead of a pop. The atlas is 8x8x20x7, about 9 KB.
+// Stub: towers rendered as simple geometry, no texture upload needed for this PR
 @(private = "file")
-client_renderer_upload_pylons :: proc(r: ^Client_Renderer, world: ^Pylon_World, dt: f32) {
-	gain := min(dt * 12.0, 1.0)
-	dirty := false
+client_renderer_update_towers :: proc(r: ^Client_Renderer, world: ^Tower_World, dt: f32) {
+	// Track which towers changed for future optimizations
 	for i in 0 ..< MAX_PYLONS {
-		g := pylon_grid(world, Pylon_ID(i))
-		if g == nil {
-			continue
+		t := tower_get(world, Pylon_ID(i))
+		if t != nil && t.live_count != r.tower_seen[i] {
+			r.tower_seen[i] = t.live_count
+			r.tower_dirty[i] = true
 		}
-		off := i * PYLON_VOX
-		for y in 0 ..< PYLON_NY {
-			for x in 0 ..< PYLON_NX {
-				col := ore_col_index(x, y)
-				target := f32(ore_grid_column_h(g, x, y))
-				disp := &r.pylon_disp_h[i][col]
-				if !r.pylon_disp_ok[i] || abs(disp^ - target) > 1.25 {
-					disp^ = target
-					dirty = true
-				} else if abs(disp^ - target) > 0.01 {
-					disp^ += (target - disp^) * gain
-					dirty = true
-				} else {
-					disp^ = target
-				}
-				h := disp^
-				for z in 0 ..< PYLON_NZ {
-					occ := clampf(h - f32(z), 0, 1)
-					pylon_atlas[off + ore_index(x, y, z)] = u8(occ * 255.0 + 0.5)
-				}
-			}
-		}
-		r.pylon_disp_ok[i] = true
-		if g.version != r.pylon_seen[i] {
-			r.pylon_seen[i] = g.version
-			dirty = true
-		}
-	}
-	if dirty {
-		sg.update_image(r.pylon_tex, {mip_levels = {0 = {ptr = &pylon_atlas, size = PYLON_ATLAS_BYTES}}})
 	}
 }
 
@@ -576,12 +504,13 @@ client_renderer_draw :: proc(r: ^Client_Renderer, gc: ^Game_Client) {
 		fs_params.solid_boxes[2 * i + 1] = c
 	}
 
-	client_renderer_upload_pylons(r, &world.pylons, dt)
+	client_renderer_update_towers(r, &world.towers, dt)
 	for i in 0..<MAX_PYLONS {
-		p := &world.pylons.pylons[i]
-		fs_params.pylons[i] = {p.base.x, p.base.y, p.base.z, p.yaw}
-		fs_params.pylon_shape[i] = {p.shape.height, p.shape.radius, p.shape.seed, f32(u8(p.ore))}
-		fs_params.pylon_bound[i] = {p.bound_z0, p.bound_z1, p.bound_r, p.intact}
+		t := &world.towers.towers[i]
+		// Stub shader params: no actual SDF march this PR
+		fs_params.pylons[i] = {t.base.x, t.base.y, t.base.z, t.yaw}
+		fs_params.pylon_shape[i] = {t.core_height, CORE_RADIUS, 0, f32(u8(t.ore))}
+		fs_params.pylon_bound[i] = {0, t.core_height, SPIRAL_BASE_RADIUS, t.intact}
 	}
 	for i in 0..<MAX_SNAPSHOT_CHUNKS {
 		c := &world.chunks[i]
@@ -1124,14 +1053,14 @@ hud_playing :: proc(gc: ^Game_Client, cols, rows: f32) {
 				sdtx.printf("%s %3d%% ", team_name(team_from_index(i)), int(f32(gs.centre_share[i]) / 255.0 * 100))
 			}
 		} else {
-			// Pylons: how much of each tower is still standing. G is the golden
+			// Towers: how much of each tower is still standing. G is the golden
 			// one in the centre, then the near-lane towers and the far ones.
 			sdtx.pos(cols * 0.5 - f32(MAX_PYLONS) * 4.0, 3)
 			for i in 0..<MAX_PYLONS {
-				p := &world.pylons.pylons[i]
-				sdtx_color(ore_color(p.ore))
+				t := &world.towers.towers[i]
+				sdtx_color(ore_color(t.ore))
 				label := i == 0 ? "G" : fmt.tprintf("%d", i)
-				sdtx.printf("[%s %3d]", label, int(gs.pylons[i].intact * 100))
+				sdtx.printf("[%s %3d]", label, int(gs.towers[i].intact * 100))
 				sdtx.puts(" ")
 			}
 		}
@@ -1296,7 +1225,7 @@ hud_playing :: proc(gc: ^Game_Client, cols, rows: f32) {
 			own := team_index(world.local_team)
 			near := own + 1
 			far := own + 4
-			if gs.pylons[near].intact < PYLON_REBUILD_FRAC || gs.pylons[far].intact < PYLON_REBUILD_FRAC {
+			if gs.towers[near].intact < PYLON_REBUILD_FRAC || gs.towers[far].intact < PYLON_REBUILD_FRAC {
 				sdtx.color3f(0.85, 0.78, 0.55)
 				hud_center_text(cols, 6, "your waves are rebuilding the tower - flattening a lane stalls that team")
 			}

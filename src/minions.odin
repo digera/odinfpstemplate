@@ -488,15 +488,15 @@ minion_splash :: proc(world: ^Minion_World, at: vec3, team: Team_ID, damage, rad
 // Its own team's towers when they are visibly broken, and the centre stump once
 // the golden pylon is gone -- from then on the centre is everybody's to rebuild
 // and the first team to finish it takes the round.
-minion_rebuildable :: proc(pylons: ^Pylon_World, match: ^Match, id: Pylon_ID, team: Team_ID) -> bool {
-	p := pylon_get(pylons, id)
-	if p == nil {
+minion_rebuildable :: proc(towers: ^Tower_World, match: ^Match, id: Pylon_ID, team: Team_ID) -> bool {
+	t := tower_get(towers, id)
+	if t == nil {
 		return false
 	}
-	if p.owner == .None {
-		return match.centre_open && p.intact < CENTRE_CLAIM_FRAC
+	if t.owner == .None {
+		return match.centre_open && t.intact < CENTRE_CLAIM_FRAC
 	}
-	return p.owner == team && p.intact < PYLON_REBUILD_FRAC
+	return t.owner == team && t.intact < PYLON_REBUILD_FRAC
 }
 
 // Nearest damaged friendly tower, or none.
@@ -504,15 +504,15 @@ minion_rebuildable :: proc(pylons: ^Pylon_World, match: ^Match, id: Pylon_ID, te
 // Nearest rather than "the one furthest down the lane": with two hurt towers in
 // one corridor, chip damage on the far pylon would otherwise vacuum up the wave
 // that should be saving the inner one.
-minion_pick_rebuild :: proc(pylons: ^Pylon_World, match: ^Match, at: vec3, team: Team_ID) -> (id: Pylon_ID, ok: bool) {
+minion_pick_rebuild :: proc(towers: ^Tower_World, match: ^Match, at: vec3, team: Team_ID) -> (id: Pylon_ID, ok: bool) {
 	best := -1
 	best_d := f32(1e9)
-	for i in 0 ..< pylons.count {
-		if !minion_rebuildable(pylons, match, Pylon_ID(i), team) {
+	for i in 0 ..< towers.count {
+		if !minion_rebuildable(towers, match, Pylon_ID(i), team) {
 			continue
 		}
-		p := &pylons.pylons[i]
-		d := len_vec3(vec3{p.base.x - at.x, p.base.y - at.y, 0})
+		t := &towers.towers[i]
+		d := len_vec3(vec3{t.base.x - at.x, t.base.y - at.y, 0})
 		if d < best_d {
 			best_d = d
 			best = i
@@ -526,15 +526,15 @@ minion_pick_rebuild :: proc(pylons: ^Pylon_World, match: ^Match, at: vec3, team:
 
 // Deepest standing tower in a rival's corridor: what a pusher walks at.
 @(private = "file")
-minion_pick_push_target :: proc(pylons: ^Pylon_World, lane: Team_ID) -> (goal: vec3, ok: bool) {
+minion_pick_push_target :: proc(towers: ^Tower_World, lane: Team_ID) -> (goal: vec3, ok: bool) {
 	best := -1
 	best_r := f32(-1)
-	for i in 1 ..< pylons.count {
-		p := &pylons.pylons[i]
-		if p.owner != lane || !pylon_standing(pylons, p.id) {
+	for i in 1 ..< towers.count {
+		t := &towers.towers[i]
+		if t.owner != lane || !tower_standing(towers, t.pylon_id) {
 			continue
 		}
-		r := len_vec3(vec3{p.base.x, p.base.y, 0})
+		r := len_vec3(vec3{t.base.x, t.base.y, 0})
 		if r > best_r {
 			best_r = r
 			best = i
@@ -543,30 +543,30 @@ minion_pick_push_target :: proc(pylons: ^Pylon_World, lane: Team_ID) -> (goal: v
 	if best < 0 {
 		return {}, false
 	}
-	return pylons.pylons[best].base, true
+	return towers.towers[best].base, true
 }
 
 // Where this minion is trying to get to, and whether that place is a tower it
 // intends to become part of.
 @(private = "file")
-minion_choose_objective :: proc(m: ^Minion, pylons: ^Pylon_World, match: ^Match) -> (goal: vec3) {
+minion_choose_objective :: proc(m: ^Minion, towers: ^Tower_World, match: ^Match) -> (goal: vec3) {
 	m.has_pylon = false
 	m.rebuilding = false
 
 	switch m.kind {
 	case .Fodder:
-		if id, ok := minion_pick_rebuild(pylons, match, m.pos, m.team); ok {
+		if id, ok := minion_pick_rebuild(towers, match, m.pos, m.team); ok {
 			m.objective = id
 			m.has_pylon = true
 			m.rebuilding = true
-			return pylons.pylons[id].base
+			return towers.towers[id].base
 		}
 		// Nothing of ours needs rock: walk at the golden centre like the doc says.
 		m.objective = 0
 		return pylon_base_position(0)
 
 	case .Pusher:
-		if goal, ok := minion_pick_push_target(pylons, m.lane); ok {
+		if goal, ok := minion_pick_push_target(towers, m.lane); ok {
 			return goal
 		}
 		// Their towers are already down: keep walking their lane anyway.
@@ -734,7 +734,7 @@ minion_spot_free :: proc(pos: vec3) -> bool {
 minions_tick :: proc(
 	world:    ^Minion_World,
 	entities: ^Entity_World,
-	pylons:   ^Pylon_World,
+	towers:   ^Tower_World,
 	chunks:   ^Ore_Chunk_World,
 	match:    ^Match,
 	dt:       f32,
@@ -775,7 +775,7 @@ minions_tick :: proc(
 			minion_pick_prey(m, world, entities, i)
 		}
 
-		goal := minion_choose_objective(m, pylons, match)
+		goal := minion_choose_objective(m, towers, match)
 
 		if prey, ok := minion_prey_pos(m, world, entities); ok {
 			// Leashed to the lane: chase too far and the rush is dropped, so one
@@ -810,11 +810,11 @@ minions_tick :: proc(
 				continue
 			}
 		} else if m.mode == .Rebuild && m.has_pylon {
-			p := pylon_get(pylons, m.objective)
-			if p != nil {
-				reach := p.shape.radius + MINION_BUILD_REACH
-				if len2_vec3(vec3{p.base.x - m.pos.x, p.base.y - m.pos.y, 0}) <= reach * reach {
-					minion_donate(world, pylons, match, m, i)
+			t := tower_get(towers, m.objective)
+			if t != nil {
+				reach := CORE_RADIUS + NODE_RADIUS + MINION_BUILD_REACH
+				if len2_vec3(vec3{t.base.x - m.pos.x, t.base.y - m.pos.y, 0}) <= reach * reach {
+					minion_donate(world, towers, match, m, i)
 					continue
 				}
 			}
@@ -839,16 +839,16 @@ minions_tick :: proc(
 // rather than continuously -- it costs bodies, and the bodies were going to the
 // centre.
 @(private = "file")
-minion_donate :: proc(world: ^Minion_World, pylons: ^Pylon_World, match: ^Match, m: ^Minion, slot: int) {
-	p := pylon_get(pylons, m.objective)
-	if p == nil {
+minion_donate :: proc(world: ^Minion_World, towers: ^Tower_World, match: ^Match, m: ^Minion, slot: int) {
+	t := tower_get(towers, m.objective)
+	if t == nil {
 		minion_remove(world, slot)
 		return
 	}
-	local := pylon_build_point(pylons, m.objective, world.wave_number + slot)
-	at := pylon_to_world(p, local)
-	gained, ok := pylon_build(pylons, m.objective, at, max(m.build_r, MINION_BUILD_RADIUS), 1.0)
-	if ok && gained > 0 && p.owner == .None {
+	local := tower_build_point(towers, m.objective, world.wave_number + slot)
+	at := tower_to_world(t, local)
+	gained, ok := tower_build(towers, m.objective, at, max(m.build_r, MINION_BUILD_RADIUS), 1.0)
+	if ok && gained > 0 && t.owner == .None {
 		match_credit_centre(match, m.team, gained)
 	}
 	minion_remove(world, slot)

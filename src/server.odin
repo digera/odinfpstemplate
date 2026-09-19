@@ -52,7 +52,7 @@ Server :: struct {
 	projectiles:   Projectile_World,
 	lag_comp:      Lag_Comp_State,
 
-	pylons:        Pylon_World,
+	towers:        Tower_World,
 	chunks:        Ore_Chunk_World,
 	mining:        Mining_State,
 	minions:       Minion_World,
@@ -87,9 +87,9 @@ server_init :: proc(server: ^Server, port: u16) -> bool {
 	server.start_time = time.tick_now()
 	server.projectiles = projectile_world_init()
 	server.lag_comp = lag_comp_init()
-	// Pylons must exist before anything asks the world whether a point is free:
+	// Towers must exist before anything asks the world whether a point is free:
 	// they are part of the collision set now.
-	pylon_world_init(&server.pylons)
+	tower_world_init(&server.towers)
 	ore_chunk_world_init(&server.chunks)
 	minion_world_init(&server.minions)
 	server.match = match_init()
@@ -164,8 +164,8 @@ server_tick :: proc(server: ^Server) {
 	// free bite, and before the structure check so a bite that severs a slab is
 	// resolved in the same tick the player made it.
 	live := server.match.state != .Ended
-	mining_beams_tick(&server.mining, &server.pylons, &server.chunks, &server.world, SIMULATION_DT, live)
-	pylon_world_tick(&server.pylons, &server.chunks, SIMULATION_DT)
+	mining_beams_tick(&server.mining, &server.towers, &server.chunks, &server.world, SIMULATION_DT, live)
+	tower_world_tick(&server.towers, &server.chunks, SIMULATION_DT)
 	ore_chunk_tick(&server.chunks, SIMULATION_DT)
 	if live {
 		mining_harvest_tick(&server.chunks, &server.world, &server.match)
@@ -174,8 +174,8 @@ server_tick :: proc(server: ^Server) {
 	// The waves run after mining, so ore banked this tick is in the wallet the
 	// next wave reads, and before the match check, so a donation that finishes
 	// the centre wins the round on the tick it lands.
-	minions_tick(&server.minions, &server.world, &server.pylons, &server.chunks, &server.match, SIMULATION_DT, live)
-	match_centre_tick(&server.match, &server.pylons)
+	minions_tick(&server.minions, &server.world, &server.towers, &server.chunks, &server.match, SIMULATION_DT, live)
+	match_centre_tick(&server.match, &server.towers)
 
 	if match_tick(&server.match, SIMULATION_DT) {
 		server_round_reset(server)
@@ -206,7 +206,7 @@ server_tick :: proc(server: ^Server) {
 }
 
 server_round_reset :: proc(server: ^Server) {
-	pylon_world_reset(&server.pylons)
+	tower_world_reset(&server.towers)
 	ore_chunk_world_reset(&server.chunks)
 	mining_reset(&server.mining)
 	minion_world_reset(&server.minions)
@@ -667,7 +667,7 @@ server_send_snapshots :: proc(server: ^Server) {
 	}
 
 	dirty: [MAX_SNAPSHOT_OCC_PYLONS]Pylon_ID
-	dirty_n := pylon_collect_dirty(&server.pylons, dirty[:])
+	dirty_n := tower_collect_dirty(&server.towers, dirty[:])
 
 	for ci in 0..<server.client_count {
 		client := &server.clients[ci]
@@ -891,13 +891,13 @@ server_send_snapshots :: proc(server: ^Server) {
 		// This client's own combat log and nobody else's.
 		snapshot.combat_event_count = u8(combat_log_gather(&server.world.combat_log, self_id, &snapshot.combat_events))
 
-		snapshot.occ_count = u8(dirty_n)
+		snapshot.tower_count = u8(dirty_n)
 		for k in 0..<dirty_n {
 			id := dirty[k]
-			g := pylon_grid(&server.pylons, id)
-			snapshot.occ[k].pylon = id
-			if g != nil {
-				ore_grid_pack_heights(g, snapshot.occ[k].heights[:])
+			t := tower_get(&server.towers, id)
+			snapshot.towers[k].tower_id = id
+			if t != nil {
+				tower_pack_nodes(t, snapshot.towers[k].node_hp[:])
 			}
 		}
 
@@ -942,7 +942,7 @@ server_send_snapshots :: proc(server: ^Server) {
 			network_send(&server.network, buffer[:], size, client.addr)
 		}
 	}
-	pylon_clear_dirty(&server.pylons, dirty[:dirty_n])
+	tower_clear_dirty(&server.towers, dirty[:dirty_n])
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,12 +1038,9 @@ server_build_gamestate :: proc(server: ^Server) -> Server_GameState_Packet {
 		}
 	}
 	for i in 0..<MAX_PYLONS {
-		p := &server.pylons.pylons[i]
-		g := server.pylons.grids[i]
-		gs.pylons[i].intact = p.intact
-		if g != nil {
-			ore_grid_pack_heights(g, gs.pylons[i].heights[:])
-		}
+		t := &server.towers.towers[i]
+		gs.towers[i].intact = t.intact
+		tower_pack_nodes(t, gs.towers[i].node_hp[:])
 	}
 	return gs
 }

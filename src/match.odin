@@ -161,24 +161,23 @@ match_spend_ore :: proc(match: ^Match, team: Team_ID, kind: Ore_Kind, amount: f3
 // have laid most of the silhouette back when it closes takes the round. That is
 // the one win condition that belongs to this map: three teams fighting over who
 // gets to finish the tower they all just knocked down.
-match_centre_tick :: proc(match: ^Match, pylons: ^Pylon_World) {
+match_centre_tick :: proc(match: ^Match, towers: ^Tower_World) {
 	if match.state != .Active {
 		return
 	}
-	g := pylon_grid(pylons, 0)
-	p := pylon_get(pylons, 0)
-	if g == nil || p == nil {
+	t := tower_get(towers, 0)
+	if t == nil {
 		return
 	}
 	if !match.centre_open {
-		if g.solid == 0 {
+		if t.live_count == 0 {
 			match.centre_open = true
 			match.centre_build = {}
 			fmt.println("[Match] The golden pylon is down. Rebuild the centre to win the round.")
 		}
 		return
 	}
-	if p.intact < CENTRE_CLAIM_FRAC {
+	if t.intact < CENTRE_CLAIM_FRAC {
 		return
 	}
 	best := 0
